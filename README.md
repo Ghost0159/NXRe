@@ -1,7 +1,7 @@
 # NXRe
 Auto Rename NSP/XCI on Windows
 
-**This software require that you add in same folder : ``prod.keys`` and ``title.keys``
+**This software require that you add in same folder : ``prod.keys`` and ``title.keys``**
 
 ---
 

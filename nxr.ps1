@@ -3,6 +3,18 @@ param(
     [string]$Path
 )
 
+# Function to sanitize file names by removing invalid characters
+function SanitizeFileName {
+    param (
+        [string]$fileName
+    )
+    $invalidChars = [System.IO.Path]::GetInvalidFileNameChars()
+    foreach ($char in $invalidChars) {
+        $fileName = $fileName -replace [regex]::Escape($char), ''
+    }
+    return $fileName
+}
+
 # Check if the provided path is a directory or a file
 if (Test-Path -LiteralPath $Path -PathType Container) {
     # If it's a directory, get all .nsp and .xci files
@@ -32,42 +44,90 @@ foreach ($file in $files) {
         $titleName = $null
         $titleID = $null
         $version = $null
+        $fileType = $null
         $filePathFromOutput = $null
 
-        # Line counter
-        $lineNumber = 0
+        # Loop through the file content to extract necessary information by line number
+        for ($i = 0; $i -lt $content.Count; $i++) {
+            $line = $content[$i]
+            $lineNumber = $i + 1
+            Write-Host ("Processing line {0}: {1}" -f $lineNumber, $line)  # Debug output
 
-        # Loop through the file content to extract necessary information
-        foreach ($line in $content) {
-            $lineNumber++
-            Write-Host ("Processing line {0}: {1}" -f $lineNumber, $line)  # Corrected debug output format
-            
-            if ($line -match 'Title Name:\s*(.+)') {
-                $titleName = $matches[1].Trim()
-            } elseif ($line -match 'Title ID:\s*(.+)') {
-                $titleID = $matches[1].Trim()
-            } elseif ($lineNumber -eq 10 -and $line -match '\s*(\d+)$') {
-                # Count the number of lines and grab the version at the 10th line where it's expected
-                $version = $matches[1].Trim()
-            } elseif ($line -match 'Filename:\s*(.+)') {
-                $filePathFromOutput = $matches[1].Trim()
+            switch ($lineNumber) {
+                6 {
+                    if ($line -match 'Title ID:\s*(\w{16})') {
+                        $titleID = $matches[1].Trim()
+                    }
+                }
+                8 {
+                    if ($line -match 'Title Name:\s*(.+)') {
+                        $titleName = $matches[1].Trim()
+                    }
+                }
+                10 {
+                    if ($line -match 'Version:\s*(\d+)\s*$') {
+                        $version = $matches[1].Trim()
+                    }
+                }
+                21 {
+                    if ($line -match 'Type:\s*(.+)') {
+                        $fileType = $matches[1].Trim()
+                    }
+                }
+                19 {
+                    if ($line -match 'Filename:\s*(.+)') {
+                        $filePathFromOutput = $matches[1].Trim()
+                    }
+                }
             }
         }
 
-        # Check if all necessary information is present
+        # Debug outputs to check extracted information
+        Write-Host "Extracted Title Name: $titleName"
+        Write-Host "Extracted Title ID: $titleID"
+        Write-Host "Extracted Version: $version"
+        Write-Host "Extracted Type: $fileType"
+        Write-Host "Extracted Filename: $filePathFromOutput"
+
+        # Determine the destination folder based on the file type
+        $destinationFolder = ""
+        switch ($fileType.ToLower()) {
+            "update" { $destinationFolder = "updates" }
+            "dlc" { $destinationFolder = "dlc" }
+            "base" { $destinationFolder = "base" }
+            default { 
+                Write-Host "Unknown or missing file type '$fileType'. Using default directory 'others'."
+                $destinationFolder = "others"
+            }
+        }
+
+        # Create the destination folder inside the original file's directory
+        $originalFileDirectory = (Get-Item -LiteralPath $file).Directory.FullName
+        $destinationPath = Join-Path -Path $originalFileDirectory -ChildPath $destinationFolder
+        if (-not (Test-Path -LiteralPath $destinationPath)) {
+            New-Item -ItemType Directory -Path $destinationPath | Out-Null
+        }
+
+        # If Title Name is missing, move the file to the appropriate directory without renaming
         if (-not $titleName) {
-            Write-Host "Error: 'Title Name' not found for '$file'."
+            Write-Host "Title Name is missing. Moving the file to the '$destinationFolder' directory without renaming."
+            
+            # Move the file to the designated folder
+            $newFilePath = Join-Path -Path $destinationPath -ChildPath (Get-Item -LiteralPath $file).Name
+            Move-Item -LiteralPath $file -Destination $newFilePath -Force
+            Write-Output "Moved '$file' to '$newFilePath'"
             continue
         }
 
+        # Check if all necessary information is present for renaming
         if (-not $titleID) {
             Write-Host "Error: 'Title ID' not found for '$file'."
             continue
         }
 
         if (-not $version) {
-            Write-Host "Error: 'Version' not found for '$file'."
-            continue
+            Write-Host "Error: 'Version' not found for '$file'. Defaulting to '0'."
+            $version = "0"
         }
 
         # Use the initially provided file path if the extracted path is null or empty
@@ -75,17 +135,17 @@ foreach ($file in $files) {
             $filePathFromOutput = $file
         }
 
-        # Check if the complete path is correct and if the file exists
-        if (-not (Test-Path -LiteralPath $filePathFromOutput -PathType Leaf)) {
-            Write-Host "The file specified in 'Filename' does not exist or is invalid: '$filePathFromOutput'."
-            continue
-        }
+        # Sanitize the title name for any invalid characters
+        $sanitizedTitleName = SanitizeFileName -fileName $titleName
 
-        # Define the new file name using the extracted information
-        $newFileName = "$titleName [$titleID][v$version]$([System.IO.Path]::GetExtension($filePathFromOutput))"
+        # Define the new file name using the sanitized Title Name, Title ID, and other extracted information
+        $newFileName = "$sanitizedTitleName [$titleID][v$version]$([System.IO.Path]::GetExtension($filePathFromOutput))"
+        Write-Host "New file name will be: $newFileName"  # Debug output
 
-        # Build the full path for the new file name
-        $newFilePath = Join-Path -Path (Get-Item -LiteralPath $filePathFromOutput).DirectoryName -ChildPath $newFileName
+        # Build the full path for the new file name in the destination folder
+        $newFilePath = Join-Path -Path $destinationPath -ChildPath $newFileName
+
+        Write-Host "Full new file path: $newFilePath"  # Debug output
 
         # Check if the new path already exists to avoid conflicts
         if (Test-Path -LiteralPath $newFilePath) {
@@ -93,9 +153,9 @@ foreach ($file in $files) {
             continue
         }
 
-        # Rename the file if the new path is valid
-        Rename-Item -LiteralPath $filePathFromOutput -NewName $newFilePath -Force
-        Write-Output "Renamed '$filePathFromOutput' to '$newFileName'"
+        # Move and rename the file to the new location
+        Move-Item -LiteralPath $filePathFromOutput -Destination $newFilePath -Force
+        Write-Output "Moved and renamed '$filePathFromOutput' to '$newFilePath'"
 
     } catch {
         Write-Host "Error: An exception occurred. Details: $_"
